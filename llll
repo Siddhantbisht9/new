@@ -1,0 +1,195 @@
+# ============================================================
+# Azure Migrate - Subscription-wide Replication Status
+# ============================================================
+
+$SubscriptionId = ""
+$TenantId       = ""
+
+# ------------------------------------------------------------
+# 1. Login using Device Code
+# ------------------------------------------------------------
+
+Write-Host "Connecting to Azure..." -ForegroundColor Cyan
+
+try {
+    Connect-AzAccount `
+        -Tenant $TenantId `
+        -Subscription $SubscriptionId `
+        -UseDeviceAuthentication `
+        -ErrorAction Stop
+}
+catch {
+    Write-Error "Azure login failed: $($_.Exception.Message)"
+    exit 1
+}
+
+# ------------------------------------------------------------
+# 2. Verify subscription context
+# ------------------------------------------------------------
+
+$Context = Get-AzContext
+
+if (-not $Context) {
+    Write-Error "No Azure context was established."
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Connected successfully." -ForegroundColor Green
+Write-Host "Subscription : $($Context.Subscription.Name)"
+Write-Host "Subscription ID: $($Context.Subscription.Id)"
+Write-Host "Tenant       : $($Context.Tenant.Id)"
+Write-Host ""
+
+# ------------------------------------------------------------
+# 3. Get all Resource Groups
+# ------------------------------------------------------------
+
+$ResourceGroups = Get-AzResourceGroup -ErrorAction Stop
+
+Write-Host "Found $($ResourceGroups.Count) Resource Groups." `
+    -ForegroundColor Cyan
+
+# ------------------------------------------------------------
+# 4. Prepare report
+# ------------------------------------------------------------
+
+$Report = @()
+
+# ------------------------------------------------------------
+# 5. Check every Resource Group
+# ------------------------------------------------------------
+
+foreach ($RG in $ResourceGroups) {
+
+    Write-Host ""
+    Write-Host "==========================================" `
+        -ForegroundColor DarkGray
+
+    Write-Host "Resource Group: $($RG.ResourceGroupName)" `
+        -ForegroundColor Cyan
+
+    # Find Azure Migrate projects in this RG
+    $Projects = Get-AzMigrateProject `
+        -ResourceGroupName $RG.ResourceGroupName `
+        -ErrorAction SilentlyContinue
+
+    if (-not $Projects) {
+        Write-Host "No Azure Migrate project found." `
+            -ForegroundColor DarkGray
+        continue
+    }
+
+    foreach ($Project in $Projects) {
+
+        Write-Host "  Azure Migrate Project: $($Project.Name)" `
+            -ForegroundColor Yellow
+
+        try {
+
+            # Get migration status for all machines
+            $Servers = Get-AzMigrateServerMigrationStatus `
+                -ProjectName $Project.Name `
+                -ResourceGroupName $RG.ResourceGroupName `
+                -ErrorAction Stop
+
+            if (-not $Servers) {
+                Write-Host "  No migration servers found." `
+                    -ForegroundColor DarkGray
+                continue
+            }
+
+            foreach ($Server in $Servers) {
+
+                $Detail = $Server.ProviderSpecificDetail
+
+                $Report += [PSCustomObject]@{
+
+                    ResourceGroup = $RG.ResourceGroupName
+
+                    Project = $Project.Name
+
+                    VMName = $Server.MachineName
+
+                    MigrationState =
+                        $Server.MigrationState
+
+                    StateDescription =
+                        $Server.MigrationStateDescription
+
+                    ReplicationProgress =
+                        $Detail.InitialSeedingProgressPercentage
+
+                    MigrationProgress =
+                        $Detail.MigrationProgressPercentage
+
+                    UploadSpeed =
+                        $Server.UploadSpeed
+
+                    TimeRemaining =
+                        $Server.TimeRemaining
+
+                    LastRecoveryPoint =
+                        $Detail.LastRecoveryPointReceived
+                }
+            }
+        }
+        catch {
+
+            Write-Warning `
+                "Unable to query project '$($Project.Name)': $($_.Exception.Message)"
+        }
+    }
+}
+
+# ------------------------------------------------------------
+# 6. Display report
+# ------------------------------------------------------------
+
+Write-Host ""
+Write-Host "==========================================" `
+    -ForegroundColor Green
+
+Write-Host "Azure Migrate Replication Report" `
+    -ForegroundColor Green
+
+Write-Host "==========================================" `
+    -ForegroundColor Green
+
+if ($Report.Count -eq 0) {
+
+    Write-Warning "No Azure Migrate replication records were found."
+
+}
+else {
+
+    $Report |
+        Sort-Object ResourceGroup, Project, VMName |
+        Format-Table `
+            ResourceGroup,
+            Project,
+            VMName,
+            MigrationState,
+            ReplicationProgress,
+            UploadSpeed,
+            TimeRemaining `
+            -AutoSize
+
+    # --------------------------------------------------------
+    # 7. Export CSV
+    # --------------------------------------------------------
+
+    $OutputFile = Join-Path `
+        (Get-Location) `
+        "AzureMigrate-Replication-Report.csv"
+
+    $Report |
+        Export-Csv `
+            -Path $OutputFile `
+            -NoTypeInformation `
+            -Force
+
+    Write-Host ""
+    Write-Host "CSV report:" -ForegroundColor Green
+    Write-Host $OutputFile -ForegroundColor Yellow
+}
