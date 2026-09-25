@@ -1,0 +1,228 @@
+# ============================================================
+# Azure Migrate - VM + Disk Replication / Health Report
+# ============================================================
+
+$SubscriptionId = "<SUBSCRIPTION-ID>"
+$TenantId       = "<TENANT-ID>"
+$ResourceGroup  = "<RESOURCE-GROUP-NAME>"
+$ProjectName    = "<AZURE-MIGRATE-PROJECT-NAME>"
+
+# ============================================================
+# 1. Login
+# ============================================================
+
+Write-Host "Connecting to Azure..." -ForegroundColor Cyan
+
+try {
+    Connect-AzAccount `
+        -Tenant $TenantId `
+        -Subscription $SubscriptionId `
+        -UseDeviceAuthentication `
+        -ErrorAction Stop
+
+    Set-AzContext `
+        -SubscriptionId $SubscriptionId `
+        -Tenant $TenantId `
+        -ErrorAction Stop
+}
+catch {
+    Write-Error "Azure authentication failed: $($_.Exception.Message)"
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Connected successfully." -ForegroundColor Green
+Write-Host "Resource Group : $ResourceGroup"
+Write-Host "Project        : $ProjectName"
+Write-Host ""
+
+# ============================================================
+# 2. Get migration status
+# ============================================================
+
+try {
+
+    $Servers = Get-AzMigrateServerMigrationStatus `
+        -ProjectName $ProjectName `
+        -ResourceGroupName $ResourceGroup `
+        -ErrorAction Stop
+
+}
+catch {
+
+    Write-Error "Unable to retrieve migration status: $($_.Exception.Message)"
+    exit 1
+}
+
+if (-not $Servers) {
+
+    Write-Warning "No migration servers were returned."
+    exit 0
+}
+
+Write-Host "Found $($Servers.Count) server(s)." -ForegroundColor Green
+Write-Host ""
+
+# ============================================================
+# 3. Create reports
+# ============================================================
+
+$VMReport   = @()
+$DiskReport = @()
+
+foreach ($Server in $Servers) {
+
+    $VMName = $Server.MachineName
+    $Detail = $Server.ProviderSpecificDetail
+
+    # --------------------------------------------------------
+    # VM / Server health
+    # --------------------------------------------------------
+
+    $VMReport += [PSCustomObject]@{
+
+        ResourceGroup        = $ResourceGroup
+        Project              = $ProjectName
+        VMName               = $VMName
+
+        MigrationState       = $Server.MigrationState
+        MigrationDescription = $Server.MigrationStateDescription
+
+        ReplicationProgress  = $Detail.InitialSeedingProgressPercentage
+        MigrationProgress    = $Detail.MigrationProgressPercentage
+
+        UploadSpeed          = $Server.UploadSpeed
+        TimeRemaining        = $Server.TimeRemaining
+
+        LastRecoveryPoint    = $Detail.LastRecoveryPointReceived
+
+        ServerHealth         = $Server.Health
+        ReplicationHealth    = $Server.ReplicationHealth
+    }
+
+    # --------------------------------------------------------
+    # Look for disk information
+    # --------------------------------------------------------
+
+    $Disks = $null
+
+    # Try common locations used by provider-specific details
+    if ($Detail.Disks) {
+        $Disks = $Detail.Disks
+    }
+    elseif ($Detail.Disk) {
+        $Disks = $Detail.Disk
+    }
+    elseif ($Detail.DiskDetails) {
+        $Disks = $Detail.DiskDetails
+    }
+
+    if ($Disks) {
+
+        foreach ($Disk in $Disks) {
+
+            $DiskReport += [PSCustomObject]@{
+
+                ResourceGroup       = $ResourceGroup
+                Project             = $ProjectName
+                VMName              = $VMName
+
+                DiskName            = $Disk.Name
+                DiskId              = $Disk.Id
+                DiskSizeGB          = $Disk.SizeInGB
+
+                DiskReplicationStatus =
+                    $Disk.ReplicationStatus
+
+                DiskReplicationHealth =
+                    $Disk.ReplicationHealth
+
+                DiskHealth =
+                    $Disk.Health
+
+                ReplicationProgress =
+                    $Disk.InitialSeedingProgressPercentage
+
+                MigrationProgress =
+                    $Disk.MigrationProgressPercentage
+            }
+        }
+    }
+}
+
+# ============================================================
+# 4. Display VM / Server report
+# ============================================================
+
+Write-Host ""
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "SERVER / VM REPLICATION HEALTH" `
+    -ForegroundColor Cyan
+
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+$VMReport |
+    Format-Table `
+        VMName,
+        MigrationState,
+        ReplicationProgress,
+        ReplicationHealth,
+        ServerHealth,
+        TimeRemaining `
+        -AutoSize
+
+# ============================================================
+# 5. Display Disk report
+# ============================================================
+
+Write-Host ""
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "DISK REPLICATION / HEALTH" `
+    -ForegroundColor Cyan
+
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+if ($DiskReport.Count -gt 0) {
+
+    $DiskReport |
+        Format-Table `
+            VMName,
+            DiskName,
+            DiskSizeGB,
+            DiskReplicationStatus,
+            DiskReplicationHealth,
+            DiskHealth,
+            ReplicationProgress `
+            -AutoSize
+}
+else {
+
+    Write-Warning "No disk-level information was returned by the migration status command."
+}
+
+# ============================================================
+# 6. Export CSV files
+# ============================================================
+
+$VMReport |
+    Export-Csv `
+        -Path ".\AzureMigrate-VM-Replication-Health.csv" `
+        -NoTypeInformation `
+        -Force
+
+$DiskReport |
+    Export-Csv `
+        -Path ".\AzureMigrate-Disk-Replication-Health.csv" `
+        -NoTypeInformation `
+        -Force
+
+Write-Host ""
+Write-Host "Reports created:" -ForegroundColor Green
+Write-Host "  AzureMigrate-VM-Replication-Health.csv"
+Write-Host "  AzureMigrate-Disk-Replication-Health.csv"
