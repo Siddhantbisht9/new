@@ -1,0 +1,25 @@
+$Projects = Get-AzMigrateProject -ResourceGroupName "<RESOURCE-GROUP>"
+
+foreach ($Project in $Projects) {
+
+    Write-Host "PROJECT: $($Project.Name)" -ForegroundColor Cyan
+
+    $Servers = Get-AzMigrateServerReplication `
+        -ProjectName $Project.Name `
+        -ResourceGroupName "<RESOURCE-GROUP>"
+
+    Write-Host "Servers: $($Servers.Count)"
+
+    if ($Servers.Count -gt 0) {
+
+        $Full = Get-AzMigrateServerReplication `
+            -TargetObjectID $Servers[0].Id
+
+        $Full | Format-List *
+
+        Write-Host ""
+        Write-Host "PROVIDER DETAILS:" -ForegroundColor Yellow
+
+        $Full.ProviderSpecificDetail | Format-List *
+    }
+}
