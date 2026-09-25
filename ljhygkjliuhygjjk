@@ -1,0 +1,269 @@
+# ============================================================
+# Azure Migrate - Replication / Disk Discovery
+# ============================================================
+
+$SubscriptionId = "<SUBSCRIPTION-ID>"
+$ResourceGroup  = "sw-migration-rg"
+
+# ============================================================
+# 1. LOGIN
+# ============================================================
+
+Write-Host ""
+Write-Host "Connecting to Azure..." -ForegroundColor Cyan
+
+try {
+    Connect-AzAccount `
+        -Subscription $SubscriptionId `
+        -UseDeviceAuthentication `
+        -ErrorAction Stop | Out-Null
+
+    Set-AzContext `
+        -SubscriptionId $SubscriptionId `
+        -ErrorAction Stop | Out-Null
+}
+catch {
+    Write-Host "Azure login failed:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Connected." -ForegroundColor Green
+Write-Host ""
+
+# ============================================================
+# 2. CHECK RESOURCE GRAPH MODULE
+# ============================================================
+
+if (-not (Get-Command Search-AzGraph -ErrorAction SilentlyContinue)) {
+
+    Write-Host "Search-AzGraph is not available." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Install it with:" -ForegroundColor Yellow
+    Write-Host "Install-Module Az.ResourceGraph -Scope CurrentUser"
+    exit 1
+}
+
+# ============================================================
+# 3. DISCOVER MIGRATION / REPLICATION RESOURCES
+# ============================================================
+
+Write-Host "Searching $ResourceGroup for migration and replication resources..." `
+    -ForegroundColor Cyan
+
+$query = @"
+Resources
+| where resourceGroup =~ "$ResourceGroup"
+| where
+       type contains "migrate"
+    or type contains "replication"
+    or type contains "recovery"
+    or type contains "replica"
+    or type contains "dataprotection"
+    or type contains "failover"
+    or name contains "replication"
+    or name contains "replica"
+    or name contains "migration"
+    or name contains "disk"
+| project
+    ResourceGroup = resourceGroup,
+    ResourceType = type,
+    ResourceName = name,
+    Location = location,
+    ResourceId = id,
+    Properties = properties
+| order by ResourceType asc, ResourceName asc
+"@
+
+try {
+    $Resources = Search-AzGraph `
+        -Query $query `
+        -First 5000 `
+        -ErrorAction Stop
+}
+catch {
+    Write-Host "Resource Graph query failed." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# 4. SHOW DISCOVERED RESOURCES
+# ============================================================
+
+Write-Host ""
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "DISCOVERED MIGRATION / REPLICATION RESOURCES" `
+    -ForegroundColor Cyan
+
+Write-Host "============================================================"
+
+if (-not $Resources) {
+
+    Write-Host ""
+    Write-Host "No matching resources were found." `
+        -ForegroundColor Yellow
+
+    Write-Host ""
+    Write-Host "Let's search ALL resources in the resource group instead."
+
+}
+else {
+
+    Write-Host ""
+    Write-Host "Found $($Resources.Count) matching resources." `
+        -ForegroundColor Green
+
+    $Resources |
+        Select-Object `
+            ResourceType,
+            ResourceName,
+            Location |
+        Format-Table -AutoSize
+}
+
+# ============================================================
+# 5. SEARCH SPECIFICALLY FOR DISK / REPLICATION PROPERTIES
+# ============================================================
+
+Write-Host ""
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "DISK / REPLICATION RESOURCE SEARCH" `
+    -ForegroundColor Cyan
+
+Write-Host "============================================================"
+
+$diskQuery = @"
+Resources
+| where resourceGroup =~ "$ResourceGroup"
+| where
+       type contains "disk"
+    or type contains "replication"
+    or type contains "recovery"
+    or type contains "migrate"
+| extend
+    propertiesText = tostring(properties)
+| where
+       propertiesText contains "replic"
+    or propertiesText contains "disk"
+    or propertiesText contains "health"
+    or propertiesText contains "progress"
+    or propertiesText contains "status"
+| project
+    ResourceType = type,
+    ResourceName = name,
+    Location = location,
+    ResourceId = id,
+    Properties = propertiesText
+| order by ResourceType, ResourceName
+"@
+
+try {
+
+    $DiskResources = Search-AzGraph `
+        -Query $diskQuery `
+        -First 5000 `
+        -ErrorAction Stop
+
+}
+catch {
+
+    Write-Host "Disk query failed." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+if (-not $DiskResources) {
+
+    Write-Host ""
+    Write-Host "No disk replication resources were directly exposed." `
+        -ForegroundColor Yellow
+
+}
+else {
+
+    Write-Host ""
+    Write-Host "Found $($DiskResources.Count) possible disk/replication resources." `
+        -ForegroundColor Green
+
+    $DiskResources |
+        Select-Object `
+            ResourceType,
+            ResourceName,
+            Location |
+        Format-Table -AutoSize
+}
+
+# ============================================================
+# 6. RESOURCE TYPE SUMMARY
+# ============================================================
+
+Write-Host ""
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "RESOURCE TYPE SUMMARY" `
+    -ForegroundColor Cyan
+
+Write-Host "============================================================"
+
+if ($Resources) {
+
+    $Resources |
+        Group-Object ResourceType |
+        Sort-Object Count -Descending |
+        Select-Object `
+            @{Name="Count";Expression={$_.Count}},
+            @{Name="ResourceType";Expression={$_.Name}} |
+        Format-Table -AutoSize
+}
+
+# ============================================================
+# 7. EXPORT DISCOVERY RESULTS
+# ============================================================
+
+if ($Resources) {
+
+    $Resources |
+        Select-Object `
+            ResourceGroup,
+            ResourceType,
+            ResourceName,
+            Location,
+            ResourceId |
+        Export-Csv `
+            -Path ".\AzureMigrate-Replication-Resources.csv" `
+            -NoTypeInformation `
+            -Force
+
+    Write-Host ""
+    Write-Host "Discovery report saved:" -ForegroundColor Green
+    Write-Host "AzureMigrate-Replication-Resources.csv"
+}
+
+if ($DiskResources) {
+
+    $DiskResources |
+        Select-Object `
+            ResourceType,
+            ResourceName,
+            Location,
+            ResourceId,
+            Properties |
+        Export-Csv `
+            -Path ".\AzureMigrate-Disk-Replication-Resources.csv" `
+            -NoTypeInformation `
+            -Force
+
+    Write-Host "Disk discovery report saved:" -ForegroundColor Green
+    Write-Host "AzureMigrate-Disk-Replication-Resources.csv"
+}
+
+Write-Host ""
+Write-Host "============================================================"
+Write-Host "DISCOVERY COMPLETE"
+Write-Host "============================================================"
