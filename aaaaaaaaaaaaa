@@ -1,0 +1,238 @@
+# ============================================================
+# Azure Migrate - DISK REPORT
+# Shows ONLY Azure Managed Disks in the selected Resource Group
+# Saves CSV to the local Downloads folder
+# ============================================================
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+$SubscriptionId = "<SUBSCRIPTION-ID>"
+$ResourceGroup  = "sw-migration-rg"
+
+# ============================================================
+# 1. CONNECT TO AZURE
+# ============================================================
+
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "Connecting to Azure..." -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+
+try {
+
+    Connect-AzAccount `
+        -Subscription $SubscriptionId `
+        -UseDeviceAuthentication `
+        -ErrorAction Stop | Out-Null
+
+    Set-AzContext `
+        -SubscriptionId $SubscriptionId `
+        -ErrorAction Stop | Out-Null
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "Azure login failed." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Connected successfully." -ForegroundColor Green
+Write-Host "Subscription : $SubscriptionId"
+Write-Host "Resource Group: $ResourceGroup"
+Write-Host ""
+
+# ============================================================
+# 2. CHECK AZURE RESOURCE GRAPH
+# ============================================================
+
+if (-not (Get-Command Search-AzGraph -ErrorAction SilentlyContinue)) {
+
+    Write-Host "Az.ResourceGraph is not installed." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Install it with:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Install-Module Az.ResourceGraph -Scope CurrentUser" `
+        -ForegroundColor White
+    Write-Host ""
+
+    exit 1
+}
+
+# ============================================================
+# 3. SEARCH ONLY FOR MANAGED DISKS
+# ============================================================
+
+Write-Host "Searching for managed disks..." -ForegroundColor Cyan
+Write-Host ""
+
+$query = @"
+Resources
+| where resourceGroup =~ "$ResourceGroup"
+| where type =~ "microsoft.compute/disks"
+| project
+    ResourceGroup = resourceGroup,
+    DiskName = name,
+    Location = location,
+    DiskSizeGB = todouble(properties.diskSizeGB),
+    DiskState = tostring(properties.diskState),
+    ManagedBy = tostring(properties.managedBy),
+    ProvisioningState = tostring(properties.provisioningState),
+    Sku = tostring(sku.name),
+    Id = id
+| order by DiskName asc
+"@
+
+try {
+
+    $Disks = Search-AzGraph `
+        -Query $query `
+        -First 1000 `
+        -ErrorAction Stop
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "Resource Graph query failed." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# 4. DISPLAY RESULTS
+# ============================================================
+
+Write-Host ""
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "MANAGED DISKS" `
+    -ForegroundColor Cyan
+
+Write-Host "============================================================" `
+    -ForegroundColor Cyan
+
+if (-not $Disks) {
+
+    Write-Host ""
+    Write-Host "No managed disks found." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Resource Group: $ResourceGroup"
+    Write-Host ""
+
+    exit 0
+}
+
+# ============================================================
+# 5. TOTAL DISK COUNT
+# ============================================================
+
+$DiskCount = @($Disks).Count
+
+Write-Host ""
+Write-Host "Total disks found: $DiskCount" `
+    -ForegroundColor Green
+
+Write-Host ""
+
+# ============================================================
+# 6. READABLE TABLE
+# ============================================================
+
+$Disks |
+    Select-Object `
+        DiskName,
+        DiskSizeGB,
+        Location,
+        DiskState,
+        ProvisioningState,
+        Sku,
+        ManagedBy |
+    Format-Table -AutoSize
+
+# ============================================================
+# 7. SAVE CSV TO LOCAL DOWNLOADS
+# ============================================================
+
+$DownloadsFolder = Join-Path `
+    $env:USERPROFILE `
+    "Downloads"
+
+# Make sure Downloads exists
+if (-not (Test-Path $DownloadsFolder)) {
+
+    New-Item `
+        -ItemType Directory `
+        -Path $DownloadsFolder `
+        -Force | Out-Null
+}
+
+$CsvPath = Join-Path `
+    $DownloadsFolder `
+    "AzureMigrate-Disks.csv"
+
+try {
+
+    $Disks |
+        Select-Object `
+            ResourceGroup,
+            DiskName,
+            DiskSizeGB,
+            Location,
+            DiskState,
+            ProvisioningState,
+            Sku,
+            ManagedBy,
+            Id |
+        Export-Csv `
+            -Path $CsvPath `
+            -NoTypeInformation `
+            -Force
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "Unable to save CSV." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# 8. FINISHED
+# ============================================================
+
+Write-Host ""
+Write-Host "============================================================" `
+    -ForegroundColor Green
+
+Write-Host "REPORT COMPLETE" `
+    -ForegroundColor Green
+
+Write-Host "============================================================" `
+    -ForegroundColor Green
+
+Write-Host ""
+
+Write-Host "Total disks : $DiskCount" `
+    -ForegroundColor White
+
+Write-Host ""
+
+Write-Host "CSV saved to:" `
+    -ForegroundColor Green
+
+Write-Host $CsvPath `
+    -ForegroundColor Yellow
+
+Write-Host ""
+
+Write-Host "You can open the CSV directly from your Downloads folder." `
+    -ForegroundColor White
+
+Write-Host ""
