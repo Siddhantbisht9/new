@@ -1,0 +1,465 @@
+# ============================================================
+# Azure Migrate - Discover ALL projects in a Resource Group
+# Then show replication status for ALL servers
+# ============================================================
+
+$SubscriptionId = "<SUBSCRIPTION-ID>"
+$TenantId       = "<TENANT-ID>"
+$ResourceGroup  = "sw-migration-rg"
+
+# ============================================================
+# 1. LOGIN
+# ============================================================
+
+Write-Host ""
+Write-Host "Connecting to Azure..." -ForegroundColor Cyan
+
+try {
+
+    Connect-AzAccount `
+        -Tenant $TenantId `
+        -Subscription $SubscriptionId `
+        -UseDeviceAuthentication `
+        -ErrorAction Stop
+
+    Set-AzContext `
+        -SubscriptionId $SubscriptionId `
+        -Tenant $TenantId `
+        -ErrorAction Stop
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "LOGIN FAILED" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Connected." -ForegroundColor Green
+Write-Host "Subscription : $SubscriptionId"
+Write-Host "Resource Group: $ResourceGroup"
+Write-Host ""
+
+# ============================================================
+# 2. DISCOVER ALL MIGRATE PROJECTS USING ARM
+# ============================================================
+
+Write-Host "Discovering Azure Migrate projects..." `
+    -ForegroundColor Cyan
+
+try {
+
+    $Projects = Get-AzResource `
+        -ResourceGroupName $ResourceGroup `
+        -ResourceType "Microsoft.Migrate/migrateProjects" `
+        -ErrorAction Stop
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "Unable to query Azure Migrate projects." `
+        -ForegroundColor Red
+
+    Write-Host $_.Exception.Message `
+        -ForegroundColor Red
+
+    exit 1
+}
+
+if (-not $Projects) {
+
+    Write-Host ""
+    Write-Host "No Azure Migrate projects found in:" `
+        -ForegroundColor Yellow
+
+    Write-Host $ResourceGroup
+    exit 0
+}
+
+Write-Host ""
+Write-Host "Projects discovered: $($Projects.Count)" `
+    -ForegroundColor Green
+
+foreach ($P in $Projects) {
+
+    Write-Host "  - $($P.Name)" -ForegroundColor White
+}
+
+# ============================================================
+# 3. REPORT ARRAYS
+# ============================================================
+
+$ServerReport = @()
+$DiskReport   = @()
+
+# ============================================================
+# 4. PROCESS EVERY PROJECT
+# ============================================================
+
+foreach ($ProjectResource in $Projects) {
+
+    $ProjectName = $ProjectResource.Name
+
+    Write-Host ""
+    Write-Host "============================================================" `
+        -ForegroundColor Cyan
+
+    Write-Host "PROJECT: $ProjectName" `
+        -ForegroundColor Yellow
+
+    Write-Host "============================================================" `
+        -ForegroundColor Cyan
+
+    # --------------------------------------------------------
+    # Get replicating servers
+    # --------------------------------------------------------
+
+    try {
+
+        $Servers = Get-AzMigrateServerReplication `
+            -ProjectName $ProjectName `
+            -ResourceGroupName $ResourceGroup `
+            -ErrorAction Stop
+
+    }
+    catch {
+
+        Write-Host ""
+        Write-Host "Unable to get replication information." `
+            -ForegroundColor Red
+
+        Write-Host $_.Exception.Message `
+            -ForegroundColor DarkRed
+
+        continue
+    }
+
+    if (-not $Servers) {
+
+        Write-Host ""
+        Write-Host "No replicating servers found." `
+            -ForegroundColor Yellow
+
+        continue
+    }
+
+    Write-Host ""
+    Write-Host "Servers found: $($Servers.Count)" `
+        -ForegroundColor Green
+
+    # ========================================================
+    # PROCESS EACH SERVER
+    # ========================================================
+
+    foreach ($Server in $Servers) {
+
+        # Get complete object
+        try {
+
+            $FullServer = Get-AzMigrateServerReplication `
+                -TargetObjectID $Server.Id `
+                -ErrorAction Stop
+
+        }
+        catch {
+
+            $FullServer = $Server
+        }
+
+        # ----------------------------------------------------
+        # Server name
+        # ----------------------------------------------------
+
+        $VMName = $FullServer.MachineName
+
+        if (-not $VMName) {
+            $VMName = $FullServer.DisplayName
+        }
+
+        if (-not $VMName) {
+            $VMName = $Server.Name
+        }
+
+        # ----------------------------------------------------
+        # State
+        # ----------------------------------------------------
+
+        $MigrationState =
+            $FullServer.MigrationState
+
+        $StateDescription =
+            $FullServer.MigrationStateDescription
+
+        $Provider =
+            $FullServer.ProviderSpecificDetail
+
+        # ----------------------------------------------------
+        # Try to obtain replication information
+        # ----------------------------------------------------
+
+        $Progress = $null
+        $Health   = $null
+        $Upload   = $null
+        $TimeLeft = $null
+
+        if ($Provider) {
+
+            $Progress =
+                $Provider.InitialSeedingProgressPercentage
+
+            if ($null -eq $Progress) {
+
+                $Progress =
+                    $Provider.MigrationProgressPercentage
+            }
+
+            $Health =
+                $Provider.Health
+
+            $Upload =
+                $Provider.UploadSpeed
+
+            $TimeLeft =
+                $Provider.TimeRemaining
+        }
+
+        if (-not $Health) {
+            $Health =
+                $FullServer.ReplicationHealth
+        }
+
+        if (-not $Health) {
+            $Health =
+                $FullServer.Health
+        }
+
+        if (-not $Upload) {
+            $Upload =
+                $FullServer.UploadSpeed
+        }
+
+        if (-not $TimeLeft) {
+            $TimeLeft =
+                $FullServer.TimeRemaining
+        }
+
+        # ====================================================
+        # SERVER DISPLAY
+        # ====================================================
+
+        Write-Host ""
+        Write-Host "------------------------------------------------------------"
+        Write-Host "SERVER: $VMName" -ForegroundColor Yellow
+        Write-Host "------------------------------------------------------------"
+
+        Write-Host ("Migration State      : {0}" `
+            -f $MigrationState)
+
+        Write-Host ("Description          : {0}" `
+            -f $StateDescription)
+
+        Write-Host ("Replication Progress : {0}" `
+            -f $Progress)
+
+        Write-Host ("Replication Health   : {0}" `
+            -f $Health)
+
+        Write-Host ("Upload Speed         : {0}" `
+            -f $Upload)
+
+        Write-Host ("Time Remaining       : {0}" `
+            -f $TimeLeft)
+
+        # ====================================================
+        # SERVER REPORT
+        # ====================================================
+
+        $ServerReport += [PSCustomObject]@{
+
+            Project              = $ProjectName
+            Server               = $VMName
+            MigrationState       = $MigrationState
+            Description          = $StateDescription
+            ReplicationProgress  = $Progress
+            ReplicationHealth    = $Health
+            UploadSpeed          = $Upload
+            TimeRemaining        = $TimeLeft
+        }
+
+        # ====================================================
+        # DISKS
+        # ====================================================
+
+        $Disks = $null
+
+        if ($Provider) {
+
+            if ($Provider.Disks) {
+                $Disks = $Provider.Disks
+            }
+            elseif ($Provider.Disk) {
+                $Disks = $Provider.Disk
+            }
+            elseif ($Provider.DiskDetails) {
+                $Disks = $Provider.DiskDetails
+            }
+        }
+
+        if ($Disks) {
+
+            Write-Host ""
+            Write-Host "Disk Count: $($Disks.Count)" `
+                -ForegroundColor Cyan
+
+            foreach ($Disk in $Disks) {
+
+                $DiskName = $Disk.Name
+
+                if (-not $DiskName) {
+                    $DiskName = $Disk.DiskName
+                }
+
+                Write-Host ""
+                Write-Host "  Disk: $DiskName" `
+                    -ForegroundColor White
+
+                Write-Host ("     Size                 : {0} GB" `
+                    -f $Disk.SizeInGB)
+
+                Write-Host ("     Replication Status   : {0}" `
+                    -f $Disk.ReplicationStatus)
+
+                Write-Host ("     Replication Health   : {0}" `
+                    -f $Disk.ReplicationHealth)
+
+                Write-Host ("     Disk Health          : {0}" `
+                    -f $Disk.Health)
+
+                Write-Host ("     Replication Progress : {0}" `
+                    -f $Disk.InitialSeedingProgressPercentage)
+
+                $DiskReport += [PSCustomObject]@{
+
+                    Project =
+                        $ProjectName
+
+                    Server =
+                        $VMName
+
+                    Disk =
+                        $DiskName
+
+                    SizeGB =
+                        $Disk.SizeInGB
+
+                    ReplicationStatus =
+                        $Disk.ReplicationStatus
+
+                    ReplicationHealth =
+                        $Disk.ReplicationHealth
+
+                    DiskHealth =
+                        $Disk.Health
+
+                    ReplicationProgress =
+                        $Disk.InitialSeedingProgressPercentage
+                }
+            }
+        }
+        else {
+
+            Write-Host ""
+            Write-Host "  Disk details were not returned by this provider." `
+                -ForegroundColor DarkYellow
+        }
+    }
+}
+
+# ============================================================
+# FINAL SUMMARY
+# ============================================================
+
+Write-Host ""
+Write-Host ""
+Write-Host "============================================================" `
+    -ForegroundColor Green
+
+Write-Host "FINAL SUMMARY" -ForegroundColor Green
+
+Write-Host "============================================================"
+
+Write-Host ("Projects : {0}" -f $Projects.Count)
+Write-Host ("Servers  : {0}" -f $ServerReport.Count)
+Write-Host ("Disks    : {0}" -f $DiskReport.Count)
+
+# ============================================================
+# SERVER TABLE
+# ============================================================
+
+Write-Host ""
+Write-Host "SERVER REPLICATION SUMMARY" `
+    -ForegroundColor Cyan
+
+Write-Host "============================================================"
+
+$ServerReport |
+    Format-Table `
+        Project,
+        Server,
+        MigrationState,
+        ReplicationProgress,
+        ReplicationHealth,
+        UploadSpeed,
+        TimeRemaining `
+        -AutoSize
+
+# ============================================================
+# DISK TABLE
+# ============================================================
+
+if ($DiskReport.Count -gt 0) {
+
+    Write-Host ""
+    Write-Host "DISK REPLICATION SUMMARY" `
+        -ForegroundColor Cyan
+
+    Write-Host "============================================================"
+
+    $DiskReport |
+        Format-Table `
+            Project,
+            Server,
+            Disk,
+            SizeGB,
+            ReplicationStatus,
+            ReplicationHealth,
+            DiskHealth,
+            ReplicationProgress `
+            -AutoSize
+}
+
+# ============================================================
+# SAVE REPORTS
+# ============================================================
+
+$ServerReport |
+    Export-Csv `
+        -Path ".\AzureMigrate-Server-Report.csv" `
+        -NoTypeInformation `
+        -Force
+
+$DiskReport |
+    Export-Csv `
+        -Path ".\AzureMigrate-Disk-Report.csv" `
+        -NoTypeInformation `
+        -Force
+
+Write-Host ""
+Write-Host "Reports saved successfully:" `
+    -ForegroundColor Green
+
+Write-Host "  AzureMigrate-Server-Report.csv"
+Write-Host "  AzureMigrate-Disk-Report.csv"
